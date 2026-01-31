@@ -1,33 +1,24 @@
 #!/usr/bin/env python3
 """
-Timing Side-Channel Simulation Model
+Advanced Timing Side-Channel Simulation (Early Exit) - ANIMATED MODE
 
-This module simulates a timing attack vulnerability where the execution time
-depends on how many characters of the password are correct (Early Exit).
+This module simulates a password timing attack using Matplotlib's
+FuncAnimation to visualize the 'Staircase Effect' in real-time.
 """
 
-from datetime import datetime
 from pathlib import Path
-from typing import Tuple, List
+import sys
 import time
 import random
-
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 class TimingSimulator:
-    """Simulates execution time variations based on input correctness."""
+    """Simulates the vulnerable password check."""
 
     def __init__(self, base_time: float = 100.0, char_delay: float = 20.0, 
                  jitter_std: float = 5.0):
-        """
-        Initialize the timing simulator.
-
-        Args:
-            base_time: Minimum execution time (overhead) in ms or cycles
-            char_delay: Extra time added for each correct character found
-            jitter_std: Standard deviation of random noise (network/OS jitter)
-        """
         self.base_time = base_time
         self.char_delay = char_delay
         self.jitter_std = jitter_std
@@ -35,57 +26,42 @@ class TimingSimulator:
     def vulnerable_compare(self, secret: str, user_input: str) -> float:
         """
         Simulate a vulnerable string comparison with 'Early Exit'.
-        
-        Returns:
-            Simulated execution time.
+        Returns: Execution time.
         """
         execution_time = self.base_time
-        
-        # Determine the loop length (cannot check more than the shortest string)
         min_len = min(len(secret), len(user_input))
         
         for i in range(min_len):
-            # Processing a character takes time
             execution_time += self.char_delay
-            
-            # THE VULNERABILITY:
-            # If characters don't match, we return FALSE immediately.
-            # This makes wrong guesses faster than correct guesses.
+            # The Vulnerability: Early Exit
             if secret[i] != user_input[i]:
                 break
                 
-        # Add random noise (Jitter) to make it realistic/harder
+        # Add Jitter
         noise = np.random.normal(0, self.jitter_std)
         return max(0, execution_time + noise)
 
-    def simulate_attack(self, num_samples: int, secret_pwd: str) -> Tuple[List[str], np.ndarray, np.ndarray]:
-        """
-        Generate random inputs and measure their execution times.
-        """
+    def generate_batch(self, batch_size: int, secret_pwd: str):
+        """Generates a batch of guesses and measures their time."""
         inputs = []
         timings = []
         correct_counts = []
         
-        # We need to generate inputs that have varying degrees of correctness
-        # so the graph shows the "staircase" effect clearly.
-        
-        for _ in range(num_samples):
-            # 50% chance: Completely random junk
+        for _ in range(batch_size):
+            # 50% Random Junk / 50% "Cheating" (Correct Prefix)
+            # We do this to force the 'Staircase' pattern to appear on screen
             if random.random() < 0.5:
                 guess = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=len(secret_pwd)))
-            
-            # 50% chance: We "cheat" and give it a correct prefix 
-            # (This simulates the attacker slowly guessing right letters)
             else:
                 match_len = random.randint(0, len(secret_pwd))
                 prefix = secret_pwd[:match_len]
                 suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=len(secret_pwd)-match_len))
                 guess = prefix + suffix
             
-            # Measure the time
+            # Measure Time
             t = self.vulnerable_compare(secret_pwd, guess)
             
-            # Calculate how many chars were actually correct (for the graph label)
+            # Calculate Label (How many correct?)
             match_count = 0
             for i in range(min(len(secret_pwd), len(guess))):
                 if secret_pwd[i] == guess[i]:
@@ -96,77 +72,103 @@ class TimingSimulator:
             inputs.append(guess)
             timings.append(t)
             correct_counts.append(match_count)
+            
+        return inputs, timings, correct_counts
 
-        return inputs, np.array(timings), np.array(correct_counts)
+class LiveTimingApp:
+    """Manages the live timing attack visualization."""
 
-def plot_timing_trace(correct_counts: np.ndarray, timings: np.ndarray, title: str = "Timing Analysis"):
-    """Plot execution time vs number of correct characters."""
-    plt.figure(figsize=(10, 6))
-    
-    # Scatter plot: x-axis is "Correct Characters", y-axis is "Time"
-    plt.scatter(correct_counts, timings, alpha=0.6, c=correct_counts, cmap='viridis', edgecolors='k', s=50)
-    
-    plt.title(title, fontsize=14, fontweight='bold')
-    plt.xlabel("Number of Correct Characters (Prefix)", fontsize=12)
-    plt.ylabel("Execution Time (Simulated)", fontsize=12)
-    plt.grid(True, alpha=0.3)
-    
-    # Force X-axis to show only integers (0, 1, 2...)
-    plt.xticks(range(int(max(correct_counts)) + 1))
-    
-    plt.tight_layout()
-    return plt
+    def __init__(self, secret_pwd="admin", duration=15):
+        self.secret_pwd = secret_pwd
+        self.duration = duration
+        
+        # Simulator
+        self.sim = TimingSimulator(base_time=100, char_delay=20, jitter_std=5)
+        
+        # Data Storage
+        self.all_timings = []
+        self.all_counts = []
+        self.start_time = None
+        self.is_running = True
+        
+        # Matplotlib Setup
+        self.fig, self.ax = plt.subplots(figsize=(10, 6))
+        try:
+            self.fig.canvas.manager.set_window_title("Live Timing Attack Simulator")
+        except: pass
 
-def demonstrate_simulation():
-    """Run the simulation and save files."""
-    print("=" * 60)
-    print("Timing Side-Channel Simulation Demo (Early Exit)")
-    print("=" * 60)
+        self.scat = None # Placeholder for scatter plot
+        self._setup_plots()
 
-    # Setup Paths
-    base_dir = Path(__file__).parent.absolute()
-    data_dir = base_dir / "data"
-    traces_dir = base_dir / "traces"
-    data_dir.mkdir(exist_ok=True)
-    traces_dir.mkdir(exist_ok=True)
+    def _setup_plots(self):
+        """Initializes the scatter plot."""
+        # Initialize with empty data
+        self.scat = self.ax.scatter([], [], alpha=0.6, c=[], cmap='viridis', 
+                                   edgecolors='k', s=50, vmin=0, vmax=len(self.secret_pwd))
+        
+        self.ax.set_title(f"Live Timing Leakage: Target '{self.secret_pwd}'")
+        self.ax.set_xlabel("Correct Characters (Prefix)")
+        self.ax.set_ylabel("Execution Time (ms)")
+        self.ax.grid(True, alpha=0.3)
+        self.ax.set_xlim(-0.5, len(self.secret_pwd) + 0.5)
+        self.ax.set_ylim(80, 100 + (len(self.secret_pwd) * 30)) # Auto-scale Y axis
+        self.ax.set_xticks(range(len(self.secret_pwd) + 1))
 
-    # Configuration
-    SECRET_PASSWORD = "admin"  # 5 characters
-    NUM_SAMPLES = 1000         # Enough dots to see the pattern
-    
-    # Initialize Simulator
-    simulator = TimingSimulator(base_time=100.0, char_delay=20.0, jitter_std=5.0)
+    def update(self, frame):
+        """Animation Loop."""
+        if self.start_time is None: self.start_time = time.time()
+        elapsed = time.time() - self.start_time
+        
+        # Stop Condition
+        if elapsed > self.duration:
+            if self.is_running:
+                print("\n[*] Simulation finished.")
+                self.is_running = False
+                self.ani.event_source.stop()
+                plt.close(self.fig)
+            return
 
-    print(f"\n1. Simulating attack on password: '{SECRET_PASSWORD}'")
-    print(f"   Generating {NUM_SAMPLES} guesses...")
-    
-    _, times, labels = simulator.simulate_attack(NUM_SAMPLES, SECRET_PASSWORD)
+        # 1. Generate Data (Small batch per frame)
+        _, times, counts = self.sim.generate_batch(10, self.secret_pwd)
+        
+        # 2. Store Data
+        self.all_timings.extend(times)
+        self.all_counts.extend(counts)
+        
+        # 3. Update Scatter Plot
+        # Matplotlib requires (x, y) coordinates as a 2D array
+        data = np.c_[self.all_counts, self.all_timings]
+        self.scat.set_offsets(data)
+        self.scat.set_array(np.array(self.all_counts)) # Update colors based on X value
+        
+        # Update Title
+        self.ax.set_title(f"Live Attack | Samples: {len(self.all_timings)} | Time: {elapsed:.1f}s")
 
-    # Save Data
-    np.save(data_dir / "timing_traces.npy", times)
-    np.save(data_dir / "timing_labels.npy", labels)
-    print(f"   ✅ Data saved to '{data_dir}'")
+    def run(self):
+        print(f"[*] Starting Live Timing Attack on '{self.secret_pwd}'")
+        print(f"[*] Duration: {self.duration} seconds")
+        
+        self.ani = animation.FuncAnimation(
+            self.fig, self.update, interval=50, cache_frame_data=False
+        )
+        plt.show()
+        self.save_data()
 
-    # Statistics
-    print("\n2. Analysis (Average Time per Correct Char):")
-    for i in range(len(SECRET_PASSWORD) + 1):
-        subset = times[labels == i]
-        if len(subset) > 0:
-            print(f"   - {i} Correct Chars: ~{int(np.mean(subset))} ms (based on {len(subset)} samples)")
-
-    # Plotting
-    print("\n3. Generating visualization...")
-    plot_timing_trace(labels, times, title=f"Timing Leakage for '{SECRET_PASSWORD}'")
-    
-    # Save image
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = traces_dir / f'timing_trace_{timestamp}.png'
-    plt.savefig(filename, dpi=150)
-    print(f"   📈 Plot saved to '{filename}'")
-    
-    print("\n" + "=" * 60)
-    print("Simulation complete!")
-    print("=" * 60)
+    def save_data(self):
+        base_dir = Path(__file__).parent.absolute()
+        data_dir = base_dir / "data"
+        data_dir.mkdir(exist_ok=True)
+        
+        if self.all_timings:
+            np.save(data_dir / "live_timing_traces.npy", self.all_timings)
+            np.save(data_dir / "live_timing_labels.npy", self.all_counts)
+            print(f"\n[*] Saved {len(self.all_timings)} traces to {data_dir}")
 
 if __name__ == "__main__":
-    demonstrate_simulation()
+    # You can change the password here to test different lengths
+    app = LiveTimingApp(secret_pwd="admin", duration=10)
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        app.save_data()
+        sys.exit(0)
