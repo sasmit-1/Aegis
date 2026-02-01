@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import random
+plt.style.use('dark_background')
 
 # ==========================================
 # 1. SIMULATION LOGIC
